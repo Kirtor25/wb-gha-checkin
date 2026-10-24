@@ -1,0 +1,93 @@
+name: daily-score
+
+# 每天北京时间 09:00（= UTC 01:00）。改时间只改这一行。
+# 注意：GitHub cron 一律按 UTC 解析，北京时间 = UTC+8。
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "演练模式（只查状态，不签到、不派遣、不发邮件）"
+        type: boolean
+        default: false
+
+# contents: write 仅供最后的「保活」步骤提交 .keepalive；业务逻辑本身不写仓库。
+# 若仓库 Actions 权限为只读，保活步骤会 push 失败：需到
+# Settings → Actions → General → Workflow permissions 选 "Read and write permissions"。
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-score
+  cancel-in-progress: false
+
+env:
+  # 距上次保活超过这么多天就提交一次（GitHub 官方对公开仓库的停用阈值是 60 天）
+  KEEPALIVE_DAYS: "30"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验必需 Secret
+        env:
+          WB_RT: ${{ secrets.WB_RT }}
+          WB_MAIL_USER: ${{ secrets.WB_MAIL_USER }}
+          WB_MAIL_PASS: ${{ secrets.WB_MAIL_PASS }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in WB_RT WB_MAIL_USER WB_MAIL_PASS; do
+            if [ -z "${!name:-}" ]; then
+              echo "缺少 Secret：$name"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || { echo "请到 Settings → Secrets and variables → Actions 补齐。"; exit 1; }
+
+      - name: 执行签到与旅行闭环
+        env:
+          WB_RT: ${{ secrets.WB_RT }}
+          WB_MAIL_USER: ${{ secrets.WB_MAIL_USER }}
+          WB_MAIL_PASS: ${{ secrets.WB_MAIL_PASS }}
+          WB_MAIL_TO: ${{ secrets.WB_MAIL_TO }}
+          WB_MAIL_HOST: ${{ secrets.WB_MAIL_HOST }}
+          WB_MAIL_PORT: ${{ secrets.WB_MAIL_PORT }}
+          WB_LOCATION: ${{ secrets.WB_LOCATION }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+        run: |
+          set -o pipefail
+          out="$(mktemp)"
+          python3 run.py 2>&1 | tee "$out"
+          {
+            echo "## WorkBuddy 积分任务"
+            echo ""
+            echo '```'
+            cat "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 保活（避免定时任务因仓库长期无提交被停用）
+        if: always()
+        run: |
+          set -euo pipefail
+          now=$(date -u +%s)
+          days=${KEEPALIVE_DAYS:-30}
+          limit=$(( days * 86400 ))
+          last=$(cat .keepalive 2>/dev/null | tr -dc '0-9' || true)
+          last=${last:-0}
+          if [ $(( now - last )) -lt "$limit" ]; then
+            echo "距上次保活不足 ${days} 天，跳过（上次时间戳：${last}）"
+            exit 0
+          fi
+          echo "$now" > .keepalive
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .keepalive
+          git commit -m "chore: keepalive $(date -u +%Y-%m-%d)"
+          git push
+          echo "已提交保活更新，定时任务不会被停用"
