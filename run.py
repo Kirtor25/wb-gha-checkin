@@ -268,8 +268,11 @@ def send_mail(subject, content):
     user = os.environ["WB_MAIL_USER"].strip()
     password = os.environ["WB_MAIL_PASS"].strip()
     to = (os.environ.get("WB_MAIL_TO") or "").strip() or user
-    host = os.environ.get("WB_MAIL_HOST", "smtp.qq.com").strip()
-    port = int(os.environ.get("WB_MAIL_PORT", "465"))
+    # 注意：GitHub Actions 里未配置的 Secret 会注入成空字符串（而不是不存在），
+    # 所以 os.environ.get(key, 默认值) 拿不到默认值，必须用 or 兜底。
+    host = (os.environ.get("WB_MAIL_HOST") or "").strip() or "smtp.qq.com"
+    port_raw = (os.environ.get("WB_MAIL_PORT") or "").strip()
+    port = int(port_raw) if port_raw.isdigit() else 465
     msg = MIMEText(content, "plain", "utf-8")
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = formataddr((str(Header("WorkBuddy 积分助手", "utf-8")), user))
